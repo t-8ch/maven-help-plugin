@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.io.Writer;
 import java.util.List;
 
+import org.apache.maven.RepositoryUtils;
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.repository.ArtifactRepository;
 import org.apache.maven.execution.MavenSession;
@@ -36,12 +37,18 @@ import org.apache.maven.project.DefaultProjectBuildingRequest;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.ProjectBuilder;
 import org.apache.maven.project.ProjectBuildingRequest;
-import org.apache.maven.shared.transfer.artifact.ArtifactCoordinate;
-import org.apache.maven.shared.transfer.artifact.DefaultArtifactCoordinate;
-import org.apache.maven.shared.transfer.artifact.resolve.ArtifactResolver;
 import org.codehaus.plexus.util.IOUtil;
 import org.codehaus.plexus.util.StringUtils;
 import org.codehaus.plexus.util.WriterFactory;
+import org.eclipse.aether.RepositoryException;
+import org.eclipse.aether.RepositorySystem;
+import org.eclipse.aether.RepositorySystemSession;
+import org.eclipse.aether.artifact.DefaultArtifact;
+import org.eclipse.aether.repository.RemoteRepository;
+import org.eclipse.aether.resolution.ArtifactDescriptorException;
+import org.eclipse.aether.resolution.ArtifactDescriptorRequest;
+import org.eclipse.aether.resolution.ArtifactDescriptorResult;
+import org.eclipse.aether.resolution.ArtifactRequest;
 
 /**
  * Base class with some Help Mojo functionalities.
@@ -63,13 +70,13 @@ public abstract class AbstractHelpMojo
      */
     @Component
     protected ProjectBuilder projectBuilder;
-    
+
     /**
      * Component used to resolve artifacts and download their files from remote repositories.
      */
     @Component
-    protected ArtifactResolver artifactResolver;
-    
+    RepositorySystem repositorySystem;
+
     /**
      * Remote repositories used for the project.
      */
@@ -152,7 +159,7 @@ public abstract class AbstractHelpMojo
      * @return the <code>Artifact</code> object for the <code>artifactString</code> parameter.
      * @throws MojoExecutionException if the <code>artifactString</code> doesn't respect the format.
      */
-    protected ArtifactCoordinate getArtifactCoordinate( String artifactString, String type )
+    protected org.eclipse.aether.artifact.Artifact getArtifact( String artifactString, String type )
         throws MojoExecutionException
     {
         if ( StringUtils.isEmpty( artifactString ) )
@@ -181,17 +188,8 @@ public abstract class AbstractHelpMojo
                 throw new MojoExecutionException( "The artifact parameter '" + artifactString
                     + "' should be conform to: " + "'groupId:artifactId[:version]'." );
         }
-        return getArtifactCoordinate( groupId, artifactId, version, type );
-    }
 
-    protected ArtifactCoordinate getArtifactCoordinate( String groupId, String artifactId, String version, String type )
-    {
-        DefaultArtifactCoordinate coordinate = new DefaultArtifactCoordinate();
-        coordinate.setGroupId( groupId );
-        coordinate.setArtifactId( artifactId );
-        coordinate.setVersion( version );
-        coordinate.setExtension( type );
-        return coordinate;
+        return new DefaultArtifact( groupId, artifactId, null, type, version );
     }
 
     /**
@@ -206,7 +204,6 @@ public abstract class AbstractHelpMojo
     protected MavenProject getMavenProject( String artifactString )
         throws MojoExecutionException
     {
-        ArtifactCoordinate coordinate = getArtifactCoordinate( artifactString, "pom" );
         try
         {
             ProjectBuildingRequest pbr = new DefaultProjectBuildingRequest( session.getProjectBuildingRequest() );
@@ -214,13 +211,39 @@ public abstract class AbstractHelpMojo
             pbr.setProject( null );
             pbr.setValidationLevel( ModelBuildingRequest.VALIDATION_LEVEL_MINIMAL );
             pbr.setResolveDependencies( true );
-            Artifact artifact = artifactResolver.resolveArtifact( pbr, coordinate ).getArtifact();
+
+            org.eclipse.aether.artifact.Artifact artifact = resolveArtifact(
+                    getArtifact( artifactString, "pom" ) ).getArtifact();
+
             return projectBuilder.build( artifact.getFile(), pbr ).getProject();
         }
         catch ( Exception e )
         {
             throw new MojoExecutionException( "Unable to get the POM for the artifact '" + artifactString
                 + "'. Verify the artifact parameter.", e );
+        }
+    }
+
+    protected org.eclipse.aether.resolution.ArtifactResult resolveArtifact(
+            org.eclipse.aether.artifact.Artifact aetherArtifact ) throws RepositoryException
+    {
+        try
+        {
+            List<RemoteRepository> remoteRepositories = RepositoryUtils.toRepos( this.remoteRepositories );
+            RepositorySystemSession repositorySession = session.getProjectBuildingRequest().getRepositorySession();
+
+            // use descriptor to respect relocation
+            ArtifactDescriptorRequest descriptorRequest = new ArtifactDescriptorRequest( aetherArtifact,
+                    remoteRepositories, null );
+            ArtifactDescriptorResult descriptorResult = repositorySystem.readArtifactDescriptor( repositorySession,
+                    descriptorRequest );
+            ArtifactRequest request = new ArtifactRequest( descriptorResult.getArtifact(), remoteRepositories, null );
+
+            return repositorySystem.resolveArtifact( repositorySession, request );
+        }
+        catch ( ArtifactDescriptorException  e )
+        {
+            throw new RepositoryException( e.getMessage(), e );
         }
     }
 
